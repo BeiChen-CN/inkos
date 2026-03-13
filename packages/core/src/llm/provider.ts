@@ -85,6 +85,32 @@ export function createLLMClient(config: LLMConfig): LLMClient {
   };
 }
 
+// === Error Wrapping ===
+
+function wrapLLMError(error: unknown): Error {
+  const msg = String(error);
+  if (msg.includes("403")) {
+    return new Error(
+      `API 返回 403 (请求被拒绝)。可能原因：\n` +
+      `  1. API Key 无效或过期\n` +
+      `  2. API 提供方的内容审查拦截了请求（公益/免费 API 常见）\n` +
+      `  3. 账户余额不足\n` +
+      `  建议：用 inkos doctor 测试 API 连通性，或换一个不限制内容的 API 提供方`,
+    );
+  }
+  if (msg.includes("401")) {
+    return new Error(
+      `API 返回 401 (未授权)。请检查 .env 中的 INKOS_LLM_API_KEY 是否正确。`,
+    );
+  }
+  if (msg.includes("429")) {
+    return new Error(
+      `API 返回 429 (请求过多)。请稍后重试，或检查 API 配额。`,
+    );
+  }
+  return error instanceof Error ? error : new Error(msg);
+}
+
 // === Simple Chat (used by all agents via BaseAgent.chat()) ===
 
 export async function chatCompletion(
@@ -96,17 +122,21 @@ export async function chatCompletion(
     readonly maxTokens?: number;
   },
 ): Promise<LLMResponse> {
-  const resolved = {
-    temperature: options?.temperature ?? client.defaults.temperature,
-    maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
-  };
-  if (client.provider === "anthropic") {
-    return chatCompletionAnthropic(client._anthropic!, model, messages, resolved, client.defaults.thinkingBudget);
+  try {
+    const resolved = {
+      temperature: options?.temperature ?? client.defaults.temperature,
+      maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
+    };
+    if (client.provider === "anthropic") {
+      return await chatCompletionAnthropic(client._anthropic!, model, messages, resolved, client.defaults.thinkingBudget);
+    }
+    if (client.apiFormat === "responses") {
+      return await chatCompletionOpenAIResponses(client._openai!, model, messages, resolved);
+    }
+    return await chatCompletionOpenAIChat(client._openai!, model, messages, resolved);
+  } catch (error) {
+    throw wrapLLMError(error);
   }
-  if (client.apiFormat === "responses") {
-    return chatCompletionOpenAIResponses(client._openai!, model, messages, resolved);
-  }
-  return chatCompletionOpenAIChat(client._openai!, model, messages, resolved);
 }
 
 // === Tool-calling Chat (used by agent loop) ===
@@ -121,17 +151,21 @@ export async function chatWithTools(
     readonly maxTokens?: number;
   },
 ): Promise<ChatWithToolsResult> {
-  const resolved = {
-    temperature: options?.temperature ?? client.defaults.temperature,
-    maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
-  };
-  if (client.provider === "anthropic") {
-    return chatWithToolsAnthropic(client._anthropic!, model, messages, tools, resolved, client.defaults.thinkingBudget);
+  try {
+    const resolved = {
+      temperature: options?.temperature ?? client.defaults.temperature,
+      maxTokens: options?.maxTokens ?? client.defaults.maxTokens,
+    };
+    if (client.provider === "anthropic") {
+      return await chatWithToolsAnthropic(client._anthropic!, model, messages, tools, resolved, client.defaults.thinkingBudget);
+    }
+    if (client.apiFormat === "responses") {
+      return await chatWithToolsOpenAIResponses(client._openai!, model, messages, tools, resolved);
+    }
+    return await chatWithToolsOpenAIChat(client._openai!, model, messages, tools, resolved);
+  } catch (error) {
+    throw wrapLLMError(error);
   }
-  if (client.apiFormat === "responses") {
-    return chatWithToolsOpenAIResponses(client._openai!, model, messages, tools, resolved);
-  }
-  return chatWithToolsOpenAIChat(client._openai!, model, messages, tools, resolved);
 }
 
 // === OpenAI Chat Completions API Implementation (default) ===

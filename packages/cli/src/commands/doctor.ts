@@ -61,8 +61,33 @@ export const doctorCommand = new Command("doctor")
       checks.push({ name: "Books", ok: true, detail: "0 books" });
     }
 
+    // 6. API connectivity test
+    try {
+      const { createLLMClient, chatCompletion } = await import("@actalk/inkos-core");
+      const { loadConfig } = await import("../utils.js");
+      const config = await loadConfig();
+      const client = createLLMClient(config.llm);
+
+      log("\n  [..] Testing API connectivity...");
+      const response = await chatCompletion(client, config.llm.model, [
+        { role: "user", content: "Say OK" },
+      ], { maxTokens: 16 });
+
+      checks.push({
+        name: "API Connectivity",
+        ok: true,
+        detail: `OK (model: ${config.llm.model}, tokens: ${response.usage.totalTokens})`,
+      });
+    } catch (e) {
+      checks.push({
+        name: "API Connectivity",
+        ok: false,
+        detail: String(e).split("\n")[0]!,
+      });
+    }
+
     // Output
-    log("InkOS Doctor\n");
+    log("\nInkOS Doctor\n");
     for (const check of checks) {
       const icon = check.ok ? "[OK]" : "[!!]";
       log(`  ${icon} ${check.name}: ${check.detail}`);

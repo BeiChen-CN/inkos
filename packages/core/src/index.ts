@@ -38,7 +38,7 @@ export { runAgentLoop, AGENT_TOOLS as AGENT_TOOLS, type AgentLoopOptions } from 
 export { detectChapter, detectAndRewrite, loadDetectionHistory, type DetectChapterResult, type DetectAndRewriteResult } from "./pipeline/detection-runner.js";
 
 // State
-export { StateManager } from "./state/manager.js";
+export { StateManager, EDITABLE_STORY_FILES, type EditableStoryFileKey, type AgentSessionInfo } from "./state/manager.js";
 
 // Notify
 export { dispatchNotification, dispatchWebhookEvent, type NotifyMessage } from "./notify/dispatcher.js";

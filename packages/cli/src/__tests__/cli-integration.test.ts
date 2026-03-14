@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -188,6 +188,120 @@ describe("CLI integration", () => {
     it("errors when no book exists", () => {
       const { exitCode } = runStderr(["analytics"]);
       expect(exitCode).not.toBe(0);
+    });
+  });
+
+  describe("inkos book file", () => {
+    const bookId = "test-book";
+
+    beforeAll(async () => {
+      const bookDir = join(projectDir, "books", bookId);
+      const storyDir = join(bookDir, "story");
+      await mkdir(storyDir, { recursive: true });
+      await writeFile(
+        join(bookDir, "book.json"),
+        JSON.stringify({
+          id: bookId,
+          title: "Test Book",
+          platform: "tomato",
+          genre: "xuanhuan",
+          status: "active",
+          targetChapters: 100,
+          chapterWordCount: 3000,
+          createdAt: "2026-01-01T00:00:00Z",
+          updatedAt: "2026-01-01T00:00:00Z",
+        }, null, 2),
+        "utf-8",
+      );
+      await writeFile(join(storyDir, "story_bible.md"), "# Original Bible", "utf-8");
+      await writeFile(
+        join(storyDir, "book_rules.md"),
+        [
+          "---",
+          'version: "1.0"',
+          "protagonist:",
+          "  name: 林烬",
+          "  personalityLock: [强势冷静]",
+          "  behavioralConstraints: [不圣母]",
+          "genreLock:",
+          "  primary: xuanhuan",
+          "  forbidden: [都市文风]",
+          "prohibitions:",
+          "  - 主角关键时刻心软",
+          "chapterTypesOverride: []",
+          "fatigueWordsOverride: []",
+          "additionalAuditDimensions: []",
+          "enableFullCastTracking: false",
+          "---",
+          "",
+          "## 叙事视角",
+          "第三人称近距离",
+        ].join("\n"),
+        "utf-8",
+      );
+    });
+
+    it("lists editable story files", () => {
+      const output = run(["book", "file", "list", "--json"]);
+      const data = JSON.parse(output);
+      expect(data.files).toContain("story_bible");
+      expect(data.files).toContain("book_rules");
+    });
+
+    it("shows a story file", () => {
+      const output = run(["book", "file", "show", bookId, "story_bible"]);
+      expect(output).toContain("Original Bible");
+    });
+
+    it("updates a story file", async () => {
+      const output = run([
+        "book",
+        "file",
+        "set",
+        bookId,
+        "story_bible",
+        "--content",
+        "# Updated Bible",
+      ]);
+      expect(output).toContain(`Updated story_bible for ${bookId}.`);
+
+      const content = await readFile(
+        join(projectDir, "books", bookId, "story", "story_bible.md"),
+        "utf-8",
+      );
+      expect(content).toBe("# Updated Bible");
+    });
+  });
+
+  describe("inkos agent session utilities", () => {
+    beforeAll(async () => {
+      const sessionsDir = join(projectDir, ".inkos", "agent-sessions");
+      await mkdir(sessionsDir, { recursive: true });
+      await writeFile(
+        join(sessionsDir, "default.json"),
+        JSON.stringify([
+          { role: "user", content: "上一轮说了什么？" },
+          { role: "assistant", content: "上一轮我们确认了主角设定。" },
+        ], null, 2),
+        "utf-8",
+      );
+    });
+
+    it("shows saved agent history", () => {
+      const output = run(["agent", "history"]);
+      expect(output).toContain("Session: default");
+      expect(output).toContain("上一轮我们确认了主角设定");
+    });
+
+    it("lists saved agent sessions", () => {
+      const output = run(["agent", "sessions"]);
+      expect(output).toContain("default");
+      expect(output).toContain("messages: 2");
+    });
+
+    it("clears a saved agent session", () => {
+      const output = run(["agent", "clear"]);
+      expect(output).toContain('Cleared session "default".');
     });
   });
 });

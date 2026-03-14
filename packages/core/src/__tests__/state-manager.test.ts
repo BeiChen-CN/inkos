@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { StateManager } from "../state/manager.js";
 import type { BookConfig } from "../models/book.js";
 import type { ChapterMeta } from "../models/chapter.js";
+import type { AgentMessage } from "../llm/provider.js";
 
 describe("StateManager", () => {
   let tempDir: string;
@@ -361,6 +362,66 @@ describe("StateManager", () => {
       expect(manager.bookDir("my-book")).toBe(
         join(tempDir, "books", "my-book"),
       );
+    });
+  });
+
+  describe("story file helpers", () => {
+    it("writes and reads editable story files", async () => {
+      await manager.writeStoryFile("story-book", "story_bible", "# Story Bible");
+
+      const content = await manager.readStoryFile("story-book", "story_bible");
+      expect(content).toBe("# Story Bible");
+    });
+
+    it("validates book_rules before saving", async () => {
+      await expect(
+        manager.writeStoryFile("story-book", "book_rules", "not valid book rules"),
+      ).rejects.toThrow();
+    });
+
+    it("lists editable story file keys", () => {
+      expect(manager.listEditableStoryFiles()).toContain("book_rules");
+      expect(manager.listEditableStoryFiles()).toContain("story_bible");
+    });
+  });
+
+  describe("agent sessions", () => {
+    const sessionMessages: ReadonlyArray<AgentMessage> = [
+      { role: "user", content: "继续写下一章" },
+      { role: "assistant", content: "好的，我先检查当前状态。" },
+    ];
+
+    it("round-trips agent session history", async () => {
+      await manager.saveAgentSession("default", sessionMessages);
+
+      const loaded = await manager.loadAgentSession("default");
+      expect(loaded).toEqual(sessionMessages);
+    });
+
+    it("returns empty history for a missing session", async () => {
+      const loaded = await manager.loadAgentSession("missing-session");
+      expect(loaded).toEqual([]);
+    });
+
+    it("lists saved agent sessions with message counts", async () => {
+      await manager.saveAgentSession("alpha", sessionMessages);
+      await manager.saveAgentSession("beta", [
+        ...sessionMessages,
+        { role: "tool", toolCallId: "tool-1", content: '{"ok":true}' },
+      ]);
+
+      const sessions = await manager.listAgentSessions();
+      expect(sessions.map((session) => session.id)).toContain("alpha");
+      expect(sessions.map((session) => session.id)).toContain("beta");
+      expect(sessions.find((session) => session.id === "beta")?.messageCount).toBe(3);
+    });
+
+    it("deletes saved agent sessions", async () => {
+      await manager.saveAgentSession("cleanup", sessionMessages);
+      await manager.deleteAgentSession("cleanup");
+
+      const loaded = await manager.loadAgentSession("cleanup");
+      expect(loaded).toEqual([]);
     });
   });
 });

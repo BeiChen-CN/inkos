@@ -2,6 +2,7 @@ import { chatWithTools, type AgentMessage, type ToolDefinition } from "../llm/pr
 import { PipelineRunner, type PipelineConfig } from "./runner.js";
 import type { Platform, Genre } from "../models/book.js";
 import type { ReviseMode } from "../agents/reviser.js";
+import type { EditableStoryFileKey } from "../state/manager.js";
 
 /** Tool definitions for the agent loop. */
 const TOOLS: ReadonlyArray<ToolDefinition> = [
@@ -87,6 +88,63 @@ const TOOLS: ReadonlyArray<ToolDefinition> = [
     },
   },
   {
+    name: "read_story_file",
+    description: "读取某个底层设定文件或真相文件的完整内容。适合查看 story_bible、book_rules、current_state 等单个文件。",
+    parameters: {
+      type: "object",
+      properties: {
+        bookId: { type: "string", description: "书籍ID" },
+        fileKey: {
+          type: "string",
+          enum: [
+            "story_bible",
+            "volume_outline",
+            "book_rules",
+            "current_state",
+            "pending_hooks",
+            "particle_ledger",
+            "subplot_board",
+            "emotional_arcs",
+            "character_matrix",
+            "style_guide",
+            "parent_canon",
+          ],
+          description: "要读取的文件键名",
+        },
+      },
+      required: ["bookId", "fileKey"],
+    },
+  },
+  {
+    name: "update_story_file",
+    description: "直接覆盖更新某个底层设定文件或真相文件。适合修改 story_bible、book_rules、current_state 等。",
+    parameters: {
+      type: "object",
+      properties: {
+        bookId: { type: "string", description: "书籍ID" },
+        fileKey: {
+          type: "string",
+          enum: [
+            "story_bible",
+            "volume_outline",
+            "book_rules",
+            "current_state",
+            "pending_hooks",
+            "particle_ledger",
+            "subplot_board",
+            "emotional_arcs",
+            "character_matrix",
+            "style_guide",
+            "parent_canon",
+          ],
+          description: "要更新的文件键名",
+        },
+        content: { type: "string", description: "更新后的完整文件内容" },
+      },
+      required: ["bookId", "fileKey", "content"],
+    },
+  },
+  {
     name: "list_books",
     description: "列出所有书籍。",
     parameters: {
@@ -149,6 +207,8 @@ export interface AgentLoopOptions {
   readonly onToolResult?: (name: string, result: string) => void;
   readonly onMessage?: (content: string) => void;
   readonly maxTurns?: number;
+  readonly sessionId?: string;
+  readonly useMemory?: boolean;
 }
 
 export async function runAgentLoop(
@@ -159,6 +219,11 @@ export async function runAgentLoop(
   const pipeline = new PipelineRunner(config);
   const { StateManager } = await import("../state/manager.js");
   const state = new StateManager(config.projectRoot);
+  const useMemory = options?.useMemory ?? true;
+  const sessionId = useMemory ? (options?.sessionId ?? "default") : undefined;
+  const history = sessionId
+    ? await state.loadAgentSession(sessionId)
+    : [];
 
   const messages: AgentMessage[] = [
     {
@@ -172,6 +237,8 @@ export async function runAgentLoop(
 | list_books | 列出所有书 |
 | get_book_status | 查看书的章数、字数、审计状态 |
 | read_truth_files | 读取长期记忆（状态卡、资源账本、伏笔池）和设定（世界观、卷纲、本书规则） |
+| read_story_file | 读取单个底层设定文件或真相文件 |
+| update_story_file | 直接覆盖更新单个底层设定文件或真相文件 |
 | create_book | 建书，生成世界观、卷纲、本书规则（自动加载题材 genre profile） |
 | write_draft | 写一章草稿（自动加载 genre profile + book_rules） |
 | audit_chapter | 审计章节（32维度，按题材条件启用，含AI痕迹+敏感词检测） |
@@ -203,12 +270,24 @@ export async function runAgentLoop(
 
 - 用户提供了题材/创意但没说要扫描市场 → 跳过 scan_market，直接 create_book
 - 用户说了书名/bookId → 直接操作，不需要先 list_books
+- 用户明确要求修改设定文件时，先 read_story_file 确认当前内容，再用 update_story_file 覆盖写回
 - 每完成一步，简要汇报进展
 - 仿写流程：用户提供参考文本 → import_style → 生成 style_guide.md，后续写作自动参照
 - 番外流程：先 create_book 建番外书 → import_canon 导入正传正典 → 然后正常 write_draft`,
     },
+    ...history,
     { role: "user", content: instruction },
   ];
+
+  const persistSession = async () => {
+    if (!sessionId) return;
+    await state.saveAgentSession(
+      sessionId,
+      messages.filter((message) => message.role !== "system"),
+    );
+  };
+
+  await persistSession();
 
   const maxTurns = options?.maxTurns ?? 20;
   let lastAssistantMessage = "";
@@ -222,6 +301,7 @@ export async function runAgentLoop(
       content: result.content || null,
       ...(result.toolCalls.length > 0 ? { toolCalls: result.toolCalls } : {}),
     });
+    await persistSession();
 
     if (result.content) {
       lastAssistantMessage = result.content;
@@ -244,6 +324,7 @@ export async function runAgentLoop(
 
       options?.onToolResult?.(toolCall.name, toolResult);
       messages.push({ role: "tool" as const, toolCallId: toolCall.id, content: toolResult });
+      await persistSession();
     }
   }
 
@@ -323,6 +404,30 @@ async function executeTool(
     case "get_book_status": {
       const result = await pipeline.getBookStatus(args.bookId as string);
       return JSON.stringify(result);
+    }
+
+    case "read_story_file": {
+      const fileKey = args.fileKey as EditableStoryFileKey;
+      const content = await state.readStoryFile(args.bookId as string, fileKey);
+      return JSON.stringify({
+        bookId: args.bookId,
+        fileKey,
+        content,
+      });
+    }
+
+    case "update_story_file": {
+      const fileKey = args.fileKey as EditableStoryFileKey;
+      await state.writeStoryFile(
+        args.bookId as string,
+        fileKey,
+        args.content as string,
+      );
+      return JSON.stringify({
+        bookId: args.bookId,
+        fileKey,
+        status: "updated",
+      });
     }
 
     case "read_truth_files": {

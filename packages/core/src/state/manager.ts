@@ -2,9 +2,65 @@ import { readFile, writeFile, mkdir, readdir, stat, unlink } from "node:fs/promi
 import { join } from "node:path";
 import type { BookConfig } from "../models/book.js";
 import type { ChapterMeta } from "../models/chapter.js";
+import type { AgentMessage } from "../llm/provider.js";
+import { parseBookRules } from "../models/book-rules.js";
+
+export const EDITABLE_STORY_FILES = {
+  story_bible: "story_bible.md",
+  volume_outline: "volume_outline.md",
+  book_rules: "book_rules.md",
+  current_state: "current_state.md",
+  pending_hooks: "pending_hooks.md",
+  particle_ledger: "particle_ledger.md",
+  subplot_board: "subplot_board.md",
+  emotional_arcs: "emotional_arcs.md",
+  character_matrix: "character_matrix.md",
+  style_guide: "style_guide.md",
+  parent_canon: "parent_canon.md",
+} as const;
+
+export type EditableStoryFileKey = keyof typeof EDITABLE_STORY_FILES;
+
+export interface AgentSessionInfo {
+  readonly id: string;
+  readonly messageCount: number;
+  readonly updatedAt: string;
+}
 
 export class StateManager {
   constructor(private readonly projectRoot: string) {}
+
+  private assertStoryFileKey(fileKey: string): asserts fileKey is EditableStoryFileKey {
+    if (!(fileKey in EDITABLE_STORY_FILES)) {
+      throw new Error(
+        `Unsupported story file key: ${fileKey}. Supported keys: ${Object.keys(EDITABLE_STORY_FILES).join(", ")}`,
+      );
+    }
+  }
+
+  private get agentSessionsDir(): string {
+    return join(this.projectRoot, ".inkos", "agent-sessions");
+  }
+
+  private sessionPath(sessionId: string): string {
+    return join(this.agentSessionsDir, `${encodeURIComponent(sessionId)}.json`);
+  }
+
+  private resolveStoryFile(bookId: string, fileKey: EditableStoryFileKey): string {
+    return join(this.bookDir(bookId), "story", EDITABLE_STORY_FILES[fileKey]);
+  }
+
+  private validateStoryFileContent(fileKey: EditableStoryFileKey, content: string): void {
+    if (!content.trim()) {
+      throw new Error(`Story file "${fileKey}" cannot be empty`);
+    }
+    if (fileKey === "book_rules") {
+      if (!/---\s*\n[\s\S]*?\n---/.test(content)) {
+        throw new Error("book_rules must include YAML frontmatter wrapped in --- markers");
+      }
+      parseBookRules(content);
+    }
+  }
 
   async acquireBookLock(bookId: string): Promise<() => Promise<void>> {
     const lockPath = join(this.bookDir(bookId), ".write.lock");
@@ -113,6 +169,96 @@ export class StateManager {
       JSON.stringify(index, null, 2),
       "utf-8",
     );
+  }
+
+  async readStoryFile(bookId: string, fileKey: EditableStoryFileKey): Promise<string> {
+    this.assertStoryFileKey(fileKey);
+    const path = this.resolveStoryFile(bookId, fileKey);
+    return readFile(path, "utf-8");
+  }
+
+  async writeStoryFile(
+    bookId: string,
+    fileKey: EditableStoryFileKey,
+    content: string,
+  ): Promise<void> {
+    this.assertStoryFileKey(fileKey);
+    this.validateStoryFileContent(fileKey, content);
+    const storyDir = join(this.bookDir(bookId), "story");
+    await mkdir(storyDir, { recursive: true });
+    await writeFile(this.resolveStoryFile(bookId, fileKey), content, "utf-8");
+  }
+
+  listEditableStoryFiles(): ReadonlyArray<EditableStoryFileKey> {
+    return Object.keys(EDITABLE_STORY_FILES) as EditableStoryFileKey[];
+  }
+
+  async loadAgentSession(sessionId: string): Promise<ReadonlyArray<AgentMessage>> {
+    try {
+      const raw = await readFile(this.sessionPath(sessionId), "utf-8");
+      const parsed = JSON.parse(raw) as unknown;
+      if (!Array.isArray(parsed)) {
+        throw new Error(`Agent session "${sessionId}" is invalid`);
+      }
+      return parsed as ReadonlyArray<AgentMessage>;
+    } catch (error) {
+      const code =
+        typeof error === "object" && error !== null && "code" in error
+          ? String((error as { code?: unknown }).code)
+          : undefined;
+      if (code === "ENOENT") {
+        return [];
+      }
+      throw error;
+    }
+  }
+
+  async saveAgentSession(
+    sessionId: string,
+    messages: ReadonlyArray<AgentMessage>,
+  ): Promise<void> {
+    await mkdir(this.agentSessionsDir, { recursive: true });
+    await writeFile(
+      this.sessionPath(sessionId),
+      JSON.stringify(messages, null, 2),
+      "utf-8",
+    );
+  }
+
+  async deleteAgentSession(sessionId: string): Promise<void> {
+    try {
+      await unlink(this.sessionPath(sessionId));
+    } catch {
+      // ignore missing session file
+    }
+  }
+
+  async listAgentSessions(): Promise<ReadonlyArray<AgentSessionInfo>> {
+    try {
+      const entries = await readdir(this.agentSessionsDir);
+      const sessions = await Promise.all(
+        entries
+          .filter((entry) => entry.endsWith(".json"))
+          .map(async (entry) => {
+            const id = decodeURIComponent(entry.replace(/\.json$/, ""));
+            const path = join(this.agentSessionsDir, entry);
+            const [raw, fileStat] = await Promise.all([
+              readFile(path, "utf-8"),
+              stat(path),
+            ]);
+            const parsed = JSON.parse(raw) as unknown;
+            const messageCount = Array.isArray(parsed) ? parsed.length : 0;
+            return {
+              id,
+              messageCount,
+              updatedAt: fileStat.mtime.toISOString(),
+            } satisfies AgentSessionInfo;
+          }),
+      );
+      return sessions.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    } catch {
+      return [];
+    }
   }
 
   async snapshotState(bookId: string, chapterNumber: number): Promise<void> {

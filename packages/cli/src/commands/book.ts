@@ -1,5 +1,5 @@
 import { Command } from "commander";
-import { PipelineRunner, StateManager, type BookConfig } from "@actalk/inkos-core";
+import { PipelineRunner, StateManager, type BookConfig, type EditableStoryFileKey } from "@actalk/inkos-core";
 import { loadConfig, createClient, findProjectRoot, resolveContext, resolveBookId, log, logError } from "../utils.js";
 
 export const bookCommand = new Command("book")
@@ -182,6 +182,129 @@ bookCommand
         log(JSON.stringify({ error: String(e) }));
       } else {
         logError(`Failed to list books: ${e}`);
+      }
+      process.exit(1);
+    }
+  });
+
+const bookFileCommand = bookCommand
+  .command("file")
+  .description("Read or update a book story/configuration file");
+
+bookFileCommand
+  .command("list")
+  .description("List editable story files")
+  .option("--json", "Output JSON")
+  .action(async (opts) => {
+    try {
+      const state = new StateManager(findProjectRoot());
+      const files = state.listEditableStoryFiles();
+
+      if (opts.json) {
+        log(JSON.stringify({ files }, null, 2));
+      } else {
+        for (const file of files) {
+          log(file);
+        }
+      }
+    } catch (e) {
+      if (opts.json) {
+        log(JSON.stringify({ error: String(e) }));
+      } else {
+        logError(`Failed to list story files: ${e}`);
+      }
+      process.exit(1);
+    }
+  });
+
+bookFileCommand
+  .command("show")
+  .description("Show one editable story file: show [book-id] <file-key>")
+  .argument("<args...>", "Book ID (optional) and file key")
+  .option("--json", "Output JSON")
+  .action(async (args: ReadonlyArray<string>, opts) => {
+    try {
+      const root = findProjectRoot();
+      let bookIdArg: string | undefined;
+      let fileKey: string;
+
+      if (args.length === 1) {
+        fileKey = args[0]!;
+      } else if (args.length === 2) {
+        bookIdArg = args[0];
+        fileKey = args[1]!;
+      } else {
+        throw new Error("Usage: inkos book file show [book-id] <file-key>");
+      }
+
+      const bookId = await resolveBookId(bookIdArg, root);
+      const state = new StateManager(root);
+      const content = await state.readStoryFile(bookId, fileKey as EditableStoryFileKey);
+
+      if (opts.json) {
+        log(JSON.stringify({ bookId, fileKey, content }, null, 2));
+      } else {
+        log(content);
+      }
+    } catch (e) {
+      if (opts.json) {
+        log(JSON.stringify({ error: String(e) }));
+      } else {
+        logError(`Failed to read story file: ${e}`);
+      }
+      process.exit(1);
+    }
+  });
+
+bookFileCommand
+  .command("set")
+  .description("Replace one editable story file: set [book-id] <file-key>")
+  .argument("<args...>", "Book ID (optional) and file key")
+  .option("--content <text>", "Replacement text")
+  .option("--content-file <path>", "Read replacement text from file")
+  .option("--json", "Output JSON")
+  .action(async (args: ReadonlyArray<string>, opts) => {
+    try {
+      const root = findProjectRoot();
+      let bookIdArg: string | undefined;
+      let fileKey: string;
+
+      if (args.length === 1) {
+        fileKey = args[0]!;
+      } else if (args.length === 2) {
+        bookIdArg = args[0];
+        fileKey = args[1]!;
+      } else {
+        throw new Error("Usage: inkos book file set [book-id] <file-key>");
+      }
+
+      const bookId = await resolveBookId(bookIdArg, root);
+      const state = new StateManager(root);
+      const content = await resolveContext({
+        context: opts.content,
+        contextFile: opts.contentFile,
+      });
+
+      if (!content) {
+        throw new Error("No replacement content provided. Use --content, --content-file, or pipe stdin.");
+      }
+
+      await state.writeStoryFile(
+        bookId,
+        fileKey as EditableStoryFileKey,
+        content,
+      );
+
+      if (opts.json) {
+        log(JSON.stringify({ bookId, fileKey, status: "updated" }, null, 2));
+      } else {
+        log(`Updated ${fileKey} for ${bookId}.`);
+      }
+    } catch (e) {
+      if (opts.json) {
+        log(JSON.stringify({ error: String(e) }));
+      } else {
+        logError(`Failed to update story file: ${e}`);
       }
       process.exit(1);
     }
